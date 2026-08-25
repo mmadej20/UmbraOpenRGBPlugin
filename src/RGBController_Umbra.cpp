@@ -65,7 +65,7 @@ void RGBController_Umbra::SetupZones()
         zone new_zone;
 
         char zone_name[32];
-        snprintf(zone_name, sizeof(zone_name), "ARGB Port %02u", port.index + 1u);
+        snprintf(zone_name, sizeof(zone_name), "ARGB Port %02u", port.port_index + 1u);
 
         new_zone.name        = zone_name;
         new_zone.type        = ZONE_TYPE_LINEAR;

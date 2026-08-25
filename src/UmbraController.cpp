@@ -10,7 +10,11 @@
 
 #include "UmbraController.h"
 
+#if __has_include(<hidapi/hidapi.h>)
 #include <hidapi/hidapi.h>
+#else
+#include <hidapi.h>
+#endif
 
 #include <cmath>
 #include <cstdio>
@@ -27,6 +31,74 @@ static const unsigned int UMBRA_PID = 0xFE05;
 static const unsigned int UMBRA_INTERFACE  = 0;
 static const unsigned int UMBRA_USAGE_PAGE = 0xFF00;
 static const unsigned int UMBRA_USAGE      = 0x0001;
+
+/* Command bodies (protocol framing lives in UmbraProtocol)*/
+static const uint8_t CMD_STATUS_BODY[]            = { 0x00 };
+static const uint8_t CMD_PORT_QUERY_BODY[]        = { 0x01, 0xFF };
+static const uint8_t CMD_SOFTWARE_CONTROL_BODY[]  = { 0xFD, 0x01 };
+
+/*---------------------------------------------------------*\
+| hidapi reports strings as UTF-16 wchar buffers            |
+\*---------------------------------------------------------*/
+static void AppendUtf8(std::string& out, unsigned int cp)
+{
+    if(cp <= 0x7F)
+    {
+        out.push_back((char)cp);
+    }
+    else if(cp <= 0x7FF)
+    {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+    else if(cp <= 0xFFFF)
+    {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+    else
+    {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+static std::string WideToUtf8(const wchar_t* wide)
+{
+    std::string out;
+
+    if(wide == nullptr)
+    {
+        return out;
+    }
+
+    for(const wchar_t* p = wide; *p != 0; p++)
+    {
+        unsigned int cp = (unsigned int)*p & 0xFFFFu;
+
+        /*-------------------------------------------------*\
+        | Decode UTF-16 surrogate pairs when wchar_t is     |
+        | 16-bit (Windows)                                  |
+        \*-------------------------------------------------*/
+        if(cp >= 0xD800 && cp <= 0xDBFF && p[1] != 0)
+        {
+            unsigned int low = (unsigned int)p[1] & 0xFFFFu;
+
+            if(low >= 0xDC00 && low <= 0xDFFF)
+            {
+                cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+                p++;
+            }
+        }
+
+        AppendUtf8(out, cp);
+    }
+
+    return out;
+}
 
 /*---------------------------------------------------------*\
 | Process-wide hidapi initialization                        |
@@ -117,7 +189,7 @@ std::vector<UmbraController::DeviceInfo> UmbraController::EnumerateDevices()
 
         DeviceInfo device;
         device.path   = info->path;
-        device.serial = (info->serial != nullptr) ? info->serial : "";
+        device.serial = WideToUtf8(info->serial_number);
         devices.push_back(device);
     }
 
@@ -218,7 +290,9 @@ bool UmbraController::Initialize()
     | per packet; stay below TARGET_WRITES_PER_SEC total    |
     \*-----------------------------------------------------*/
     unsigned int packets = (total_led_count_ > 0)
-                         ? ((total_led_count_ + LEDS_PER_PACKET - 1) / LEDS_PER_PACKET)
+                         ? ((total_led_count_ +
+                             (unsigned int)UmbraProtocol::LEDS_PER_PACKET - 1u) /
+                            (unsigned int)UmbraProtocol::LEDS_PER_PACKET)
                          : 0;
 
     frame_interval_ms_ = (packets > 0)
@@ -247,7 +321,7 @@ void UmbraController::CloseInternal()
 {
     if(dev_ != nullptr)
     {
-        hid_close((hid_device*)dev_);
+        hid_close(dev_);
         dev_ = nullptr;
     }
 
@@ -296,107 +370,73 @@ std::vector<UmbraController::PortInfo> UmbraController::GetPopulatedPorts()
 /*---------------------------------------------------------*\
 | Low-level IO                                              |
 \*---------------------------------------------------------*/
-uint8_t UmbraController::Checksum(const unsigned char* data, size_t length)
-{
-    uint8_t sum = 0;
-
-    for(size_t i = 0; i < length; i++)
-    {
-        sum = (uint8_t)(sum + data[i]);
-    }
-
-    return sum;
-}
-
 bool UmbraController::WritePayload(const unsigned char* payload, size_t length)
 {
-    if(dev_ == nullptr || length > HID_PAYLOAD_SIZE)
+    if(dev_ == nullptr || length > UmbraProtocol::PAYLOAD_SIZE)
     {
         return false;
     }
 
-    unsigned char report[HID_REPORT_SIZE];
+    unsigned char report[UmbraProtocol::REPORT_SIZE];
+
     memset(report, 0, sizeof(report));
     memcpy(&report[1], payload, length);
 
-    int written = hid_write((hid_device*)dev_, report, sizeof(report));
+    int written = hid_write(dev_, report, sizeof(report));
 
     return (written == (int)sizeof(report));
 }
 
-bool UmbraController::ReadReport(unsigned char* report)
+int UmbraController::ReadReport(unsigned char* report, unsigned int timeout_ms)
 {
     if(dev_ == nullptr)
-    {
-        return false;
-    }
-
-    int bytes = hid_read_timeout((hid_device*)dev_, report, HID_REPORT_SIZE, READ_TIMEOUT_MS);
-
-    return (bytes > 0);
-}
-
-bool UmbraController::SendNativeCommand(const uint8_t* body, size_t body_length)
-{
-    unsigned char payload[HID_PAYLOAD_SIZE];
-
-    memset(payload, 0, sizeof(payload));
-
-    /*-----------------------------------------------------*\
-    | Frame: 52 42 [length] 00 [body...] [checksum]         |
-    | length counts every byte of the frame including the   |
-    | trailing checksum byte                                |
-    \*-----------------------------------------------------*/
-    size_t frame_length = 4 + body_length + 1;
-
-    payload[0] = NATIVE_HEADER_0;
-    payload[1] = NATIVE_HEADER_1;
-    payload[2] = (uint8_t)frame_length;
-    payload[3] = 0x00;
-
-    if(body_length > 0)
-    {
-        memcpy(&payload[4], body, body_length);
-    }
-
-    payload[frame_length - 1] = Checksum(payload, frame_length - 1);
-
-    return WritePayload(payload, frame_length);
-}
-
-int UmbraController::FindNativeResponse(const unsigned char* report, size_t report_size,
-                                        const uint8_t* cmd, size_t cmd_length) const
-{
-    if(report_size < 4 + cmd_length + 1)
     {
         return -1;
     }
 
-    for(size_t start = 0; start + 4 + cmd_length + 1 <= report_size; start++)
+    int bytes = hid_read_timeout(dev_, report, UmbraProtocol::REPORT_SIZE,
+                                 (int)timeout_ms);
+
+    return (bytes > 0) ? bytes : -1;
+}
+
+void UmbraController::DrainInputReports()
+{
+    /*-----------------------------------------------------*\
+    | Non-blocking drain: timeout 0 returns immediately     |
+    | when no input report is queued                        |
+    \*-----------------------------------------------------*/
+    unsigned char scratch[UmbraProtocol::REPORT_SIZE];
+
+    for(unsigned int drained = 0; drained < DRAIN_MAX_REPORTS; drained++)
     {
-        if(report[start] != NATIVE_HEADER_0 || report[start + 1] != NATIVE_HEADER_1)
+        if(dev_ == nullptr)
         {
-            continue;
+            break;
         }
 
-        bool match = true;
+        int bytes = hid_read_timeout(dev_, scratch,
+                                     UmbraProtocol::REPORT_SIZE, 0);
 
-        for(size_t i = 0; i < cmd_length; i++)
+        if(bytes <= 0)
         {
-            if(report[start + 4 + i] != cmd[i])
-            {
-                match = false;
-                break;
-            }
-        }
-
-        if(match)
-        {
-            return (int)start;
+            break;
         }
     }
+}
 
-    return -1;
+bool UmbraController::SendNativeCommand(const uint8_t* body, size_t body_length)
+{
+    unsigned char payload[UmbraProtocol::PAYLOAD_SIZE];
+    size_t        frame_length = 0;
+
+    if(!UmbraProtocol::BuildNativeCommand(body, body_length,
+                                          payload, &frame_length))
+    {
+        return false;
+    }
+
+    return WritePayload(payload, frame_length);
 }
 
 /*---------------------------------------------------------*\
@@ -406,68 +446,26 @@ bool UmbraController::QueryStatus()
 {
     for(unsigned int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
     {
-        /*-------------------------------------------------*\
-        | Drain stale input reports before querying        |
-        \*-------------------------------------------------*/
-        unsigned char scratch[HID_REPORT_SIZE];
-
-        for(unsigned int drained = 0; drained < 16 && ReadReport(scratch); drained++)
-        {
-        }
+        DrainInputReports();
 
         if(!SendNativeCommand(CMD_STATUS_BODY, sizeof(CMD_STATUS_BODY)))
         {
             return false;
         }
 
-        unsigned char report[HID_REPORT_SIZE] = { 0 };
+        unsigned char report[UmbraProtocol::REPORT_SIZE] = { 0 };
+        int           bytes = ReadReport(report, READ_TIMEOUT_MS);
 
-        if(ReadReport(report))
+        if(bytes > 0)
         {
-            int start = FindNativeResponse(report, sizeof(report),
-                                           CMD_STATUS_BODY, sizeof(CMD_STATUS_BODY));
+            UmbraProtocol::StatusInfo status;
 
-            if(start >= 0)
+            /*-------------------------------------------------*\
+            | Fail-closed parsing: length and checksum are      |
+            | mandatory, garbage never passes as valid state    |
+            \*-------------------------------------------------*/
+            if(UmbraProtocol::ParseStatus(report, (size_t)bytes, &status))
             {
-                size_t off = (size_t)start;
-
-                if(off + STATUS_CHECKSUM_OFFSET >= sizeof(report))
-                {
-                    continue;
-                }
-
-                /*-----------------------------------------*\
-                | Validate frame checksum                   |
-                \*-----------------------------------------*/
-                size_t frame_len = report[off + 2];
-
-                if(frame_len >= STATUS_CHECKSUM_OFFSET + 1
-                   && off + frame_len <= sizeof(report))
-                {
-                    uint8_t checksum = Checksum(&report[off], frame_len - 1);
-
-                    if(checksum != report[off + frame_len - 1])
-                    {
-                        continue;
-                    }
-                }
-
-                /*-----------------------------------------*\
-                | Boot mode and self-check values           |
-                \*-----------------------------------------*/
-                uint8_t boot_mode = report[off + STATUS_BOOT_MODE_OFFSET];
-                uint8_t self_chk  = report[off + STATUS_SELF_CHECK_OFFSET];
-
-                if(boot_mode != 0xFF && boot_mode != 0x01)
-                {
-                    continue;
-                }
-
-                if(self_chk != 0xFF && self_chk != 0x01)
-                {
-                    continue;
-                }
-
                 return true;
             }
         }
@@ -485,97 +483,39 @@ bool UmbraController::QueryTopology()
 {
     for(unsigned int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
     {
-        /*-------------------------------------------------*\
-        | Drain stale input reports before querying        |
-        \*-------------------------------------------------*/
-        unsigned char scratch[HID_REPORT_SIZE];
-
-        for(unsigned int drained = 0; drained < 16 && ReadReport(scratch); drained++)
-        {
-        }
+        DrainInputReports();
 
         if(!SendNativeCommand(CMD_PORT_QUERY_BODY, sizeof(CMD_PORT_QUERY_BODY)))
         {
             return false;
         }
 
-        unsigned char report[HID_REPORT_SIZE] = { 0 };
+        unsigned char report[UmbraProtocol::REPORT_SIZE] = { 0 };
+        int           bytes = ReadReport(report, READ_TIMEOUT_MS);
 
-        if(ReadReport(report))
+        if(bytes > 0)
         {
-            int start = FindNativeResponse(report, sizeof(report),
-                                           CMD_PORT_QUERY_BODY, sizeof(CMD_PORT_QUERY_BODY));
+            UmbraProtocol::TopologyRecord parsed[UmbraProtocol::NUM_PORTS];
 
-            if(start >= 0)
+            /*-------------------------------------------------*\
+            | Fail-closed parsing: bad length, bad checksum,    |
+            | duplicate or out-of-range port index reject the   |
+            | whole response                                    |
+            \*-------------------------------------------------*/
+            if(UmbraProtocol::ParseTopology(report, (size_t)bytes, parsed))
             {
-                size_t off          = (size_t)start;
-                size_t records_end  = off + PORT_RECORDS_OFFSET
-                                          + NUM_PORTS * PORT_RECORD_SIZE;
+                unsigned int total = 0;
 
-                /*-----------------------------------------*\
-                | Validate frame checksum using the frame   |
-                | length byte                               |
-                \*-----------------------------------------*/
-                size_t frame_len = report[off + 2];
+                memcpy(ports_, parsed, sizeof(ports_));
 
-                if(frame_len >= (PORT_RECORDS_OFFSET + NUM_PORTS * PORT_RECORD_SIZE + 1)
-                   && off + frame_len <= sizeof(report))
+                for(unsigned int p = 0; p < NUM_PORTS; p++)
                 {
-                    uint8_t checksum = Checksum(&report[off], frame_len - 1);
-
-                    if(checksum != report[off + frame_len - 1])
-                    {
-                        continue;
-                    }
+                    total += ports_[p].led_count;
                 }
 
-                if(records_end > sizeof(report))
-                {
-                    continue;
-                }
+                total_led_count_ = total;
 
-                /*-----------------------------------------*\
-                | Parse 10 x [leds][u][u][port][u] records  |
-                \*-----------------------------------------*/
-                PortInfo parsed[NUM_PORTS];
-                bool seen[NUM_PORTS] = { false };
-                bool valid           = true;
-
-                for(unsigned int r = 0; r < NUM_PORTS && valid; r++)
-                {
-                    size_t rec_off = off + PORT_RECORDS_OFFSET + r * PORT_RECORD_SIZE;
-
-                    uint8_t leds  = report[rec_off + 0];
-                    uint8_t idx   = report[rec_off + 3];
-
-                    if(idx >= NUM_PORTS || seen[idx])
-                    {
-                        valid = false;
-                        break;
-                    }
-
-                    seen[idx]             = true;
-                    parsed[idx].index     = idx;
-                    parsed[idx].led_count = leds;
-                    parsed[idx].unknown1  = report[rec_off + 1];
-                    parsed[idx].unknown2  = report[rec_off + 2];
-                    parsed[idx].unknown4  = report[rec_off + 4];
-                }
-
-                if(valid)
-                {
-                    unsigned int total = 0;
-
-                    for(unsigned int p = 0; p < NUM_PORTS; p++)
-                    {
-                        ports_[p] = parsed[p];
-                        total    += ports_[p].led_count;
-                    }
-
-                    total_led_count_ = total;
-
-                    return true;
-                }
+                return true;
             }
         }
 
@@ -590,7 +530,8 @@ bool UmbraController::QueryTopology()
 
 bool UmbraController::EnableSoftwareControl()
 {
-    return SendNativeCommand(CMD_SOFTWARE_CONTROL_BODY, sizeof(CMD_SOFTWARE_CONTROL_BODY));
+    return SendNativeCommand(CMD_SOFTWARE_CONTROL_BODY,
+                             sizeof(CMD_SOFTWARE_CONTROL_BODY));
 }
 
 /*---------------------------------------------------------*\
@@ -637,29 +578,28 @@ bool UmbraController::SendFrame(const unsigned char* rgb, unsigned int led_count
     /*-----------------------------------------------------*\
     | Split into packets of 20 LEDs, black-padded tail      |
     \*-----------------------------------------------------*/
-    unsigned int packet_count = (led_count + LEDS_PER_PACKET - 1) / LEDS_PER_PACKET;
+    const size_t leds_per_packet = UmbraProtocol::LEDS_PER_PACKET;
 
-    unsigned char packet[HID_PAYLOAD_SIZE];
+    unsigned int packet_count =
+        (unsigned int)(((size_t)led_count + leds_per_packet - 1) / leds_per_packet);
+
+    unsigned char packet[UmbraProtocol::PAYLOAD_SIZE];
 
     for(unsigned int pkt = 0; pkt < packet_count; pkt++)
     {
-        memset(packet, 0, sizeof(packet));
+        size_t offset = (size_t)pkt * leds_per_packet * 3;
+        size_t bytes  = leds_per_packet * 3;
 
-        packet[0] = DIRECT_RGB_HEADER;
-        packet[1] = (uint8_t)packet_count;
-        packet[2] = (uint8_t)(pkt + 1);
-
-        unsigned int leds_in_packet = LEDS_PER_PACKET;
-
-        if((pkt + 1) * LEDS_PER_PACKET > led_count)
+        if(offset + bytes > (size_t)led_count * 3)
         {
-            leds_in_packet = led_count - (pkt * LEDS_PER_PACKET);
+            bytes = (size_t)led_count * 3 - offset;
         }
 
-        memcpy(&packet[3], rgb + (size_t)pkt * LEDS_PER_PACKET * 3,
-               (size_t)leds_in_packet * 3);
-
-        packet[HID_PAYLOAD_SIZE - 1] = Checksum(packet, HID_PAYLOAD_SIZE - 1);
+        if(!UmbraProtocol::BuildRgbPacket(packet_count, pkt + 1,
+                                          rgb + offset, bytes, packet))
+        {
+            return false;
+        }
 
         if(!WritePayload(packet, sizeof(packet)))
         {

@@ -5,6 +5,9 @@
 |   ARGB Hub / ROBOBLOQ USBFAN controller (VID 0x1A86,      |
 |   PID 0xFE05).                                            |
 |                                                           |
+|   Protocol framing/parsing lives in UmbraProtocol; this   |
+|   class owns only HID IO, retries and frame pacing.       |
+|                                                           |
 |   Protocol reverse-engineered by the SignalRGB plugin     |
 |   project:                                                |
 |   https://github.com/maihcx/AsiaHorse-Umbra-ARGB-Hub-SignalRGB-Plugin  |
@@ -21,7 +24,10 @@
 #include <string>
 #include <vector>
 
-struct hid_device;
+#include "UmbraProtocol.h"
+
+struct hid_device_;
+typedef struct hid_device_ hid_device;
 
 class UmbraController
 {
@@ -38,16 +44,10 @@ public:
     /*-----------------------------------------------------*\
     | Topology information for a single physical ARGB port  |
     \*-----------------------------------------------------*/
-    struct PortInfo
-    {
-        uint8_t     index;          /* physical port index, 0-based   */
-        uint8_t     led_count;      /* LEDs reported by controller    */
-        uint8_t     unknown1;       /* topology record field, unused  */
-        uint8_t     unknown2;       /* topology record field, unused  */
-        uint8_t     unknown4;       /* topology record field, unused  */
-    };
+    using PortInfo = UmbraProtocol::TopologyRecord;
 
-    static constexpr unsigned int NUM_PORTS = 10;
+    static const unsigned int NUM_PORTS =
+        (unsigned int)UmbraProtocol::NUM_PORTS;
 
     /*-----------------------------------------------------*\
     | Enumerate all connected UMBRA hubs                    |
@@ -100,52 +100,28 @@ public:
 
 private:
     /*-----------------------------------------------------*\
-    | Protocol constants                                    |
+    | Timing constants                                      |
     \*-----------------------------------------------------*/
-    static constexpr size_t     HID_PAYLOAD_SIZE        = 64;   /* bytes per HID output report payload               */
-    static constexpr size_t     HID_REPORT_SIZE         = 65;   /* report ID byte + payload                          */
-
-    static constexpr uint8_t    NATIVE_HEADER_0         = 0x52;
-    static constexpr uint8_t    NATIVE_HEADER_1         = 0x42;
-
-    static constexpr uint8_t    DIRECT_RGB_HEADER       = 0x88;
-    static constexpr unsigned int LEDS_PER_PACKET      = 20;
-
-    /* Native command bodies                                 */
-    static constexpr uint8_t CMD_STATUS_BODY[]          = { 0x00 };       /* query hub status            */
-    static constexpr uint8_t CMD_PORT_QUERY_BODY[]      = { 0x01, 0xFF }; /* query port topology         */
-    static constexpr uint8_t CMD_SOFTWARE_CONTROL_BODY[]= { 0xFD, 0x01 }; /* enter software RGB mode     */
-
-    /* Status response layout (offsets relative to frame)    */
-    static constexpr size_t     STATUS_BOOT_MODE_OFFSET = 23;
-    static constexpr size_t     STATUS_SELF_CHECK_OFFSET= 24;
-    static constexpr size_t     STATUS_CHECKSUM_OFFSET  = 25;
-
-    /* Topology response layout                              */
-    static constexpr size_t     PORT_RECORDS_OFFSET     = 6;    /* from frame start to first 5-byte record           */
-    static constexpr size_t     PORT_RECORD_SIZE        = 5;
-
     static constexpr unsigned int READ_TIMEOUT_MS      = 100;
     static constexpr unsigned int READ_ATTEMPTS        = 3;
     static constexpr unsigned int READ_RETRY_DELAY_MS  = 20;
+    static constexpr unsigned int DRAIN_MAX_REPORTS    = 16;
 
     /* Sustained write-rate ceiling (writes/sec)             */
     static constexpr unsigned int TARGET_WRITES_PER_SEC = 330;
 
     /*-----------------------------------------------------*\
-    | Protocol helpers                                      |
+    | IO helpers                                            |
     \*-----------------------------------------------------*/
-    static uint8_t Checksum(const unsigned char* data, size_t length);
-
     bool WritePayload(const unsigned char* payload, size_t length);
-    bool ReadReport(unsigned char* report);
+
+    /* Blocking read; returns bytes read or -1               */
+    int ReadReport(unsigned char* report, unsigned int timeout_ms);
+
+    /* Non-blocking drain helper                             */
+    void DrainInputReports();
 
     bool SendNativeCommand(const uint8_t* body, size_t body_length);
-
-    /* Searches a raw input report for a native response     */
-    /* frame whose command body matches cmd                  */
-    int FindNativeResponse(const unsigned char* report, size_t report_size,
-                           const uint8_t* cmd, size_t cmd_length) const;
 
     bool QueryStatus();
     bool QueryTopology();

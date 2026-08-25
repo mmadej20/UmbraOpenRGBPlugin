@@ -22,12 +22,17 @@ UmbraPlugin::UmbraPlugin()
 UmbraPlugin::~UmbraPlugin()
 {
     /*-----------------------------------------------------*\
-    | Unload() normally ran already; clean up defensively   |
+    | Unload() normally ran already; clean up defensively.  |
+    | The detection-end callback must be removed too -      |
+    | otherwise ResourceManager would keep a dangling this  |
+    | pointer when this instance is destroyed               |
     \*-----------------------------------------------------*/
     std::lock_guard<std::mutex> guard(mutex_);
 
     if(rm_ != nullptr)
     {
+        rm_->UnregisterDetectionEndCallback(&UmbraPlugin::DetectionEndCallback, this);
+
         for(HubEntry& entry : hubs_)
         {
             if(entry.controller != nullptr)
@@ -38,16 +43,16 @@ UmbraPlugin::~UmbraPlugin()
             }
         }
 
+        for(HubEntry& entry : hubs_)
+        {
+            delete entry.transport;
+            entry.transport = nullptr;
+        }
+
+        hubs_.clear();
+
         rm_ = nullptr;
     }
-
-    for(HubEntry& entry : hubs_)
-    {
-        delete entry.transport;
-        entry.transport = nullptr;
-    }
-
-    hubs_.clear();
 }
 
 /*---------------------------------------------------------*\
@@ -58,10 +63,11 @@ OpenRGBPluginInfo UmbraPlugin::GetPluginInfo()
     OpenRGBPluginInfo info;
 
     info.Name        = "AsiaHorse UMBRA";
-    info.Description = "AsiaHorse UMBRA ARGB Hub support - 10 independent ARGB ports over USB HID";
+    info.Description = "AsiaHorse UMBRA ARGB Hub support - 10 independent ARGB ports over USB HID. "
+                       "Protocol based on the SignalRGB plugin by maihcx.";
     info.Version     = UMBRA_PLUGIN_VERSION;
     info.Commit      = "";
-    info.URL         = "https://github.com/maihcx/AsiaHorse-Umbra-ARGB-Hub-SignalRGB-Plugin";
+    info.URL         = "https://github.com/mmadej20/UmbraOpenRGBPlugin";
     info.Icon        = QImage();
 
     info.Location     = OPENRGB_PLUGIN_LOCATION_DEVICES;
@@ -258,23 +264,17 @@ void UmbraPlugin::DetectionEndCallback(void* this_ptr)
     }
 
     /*-----------------------------------------------------*\
-    | Only re-attempt when no hub has been exposed yet      |
+    | Re-attempt detection after every ResourceManager run. |
+    | DetectControllers() deduplicates by path and skips    |
+    | hubs that are already exposed, so this is safe for:   |
+    |  - a hub that was busy during startup,                |
+    |  - hot-plugged additional hubs,                       |
+    |  - hubs whose ports were populated later              |
     \*-----------------------------------------------------*/
     {
         std::lock_guard<std::mutex> guard(plugin->mutex_);
 
-        bool any_exposed = false;
-
-        for(const HubEntry& entry : plugin->hubs_)
-        {
-            if(entry.controller != nullptr)
-            {
-                any_exposed = true;
-                break;
-            }
-        }
-
-        if(any_exposed || plugin->rm_ == nullptr)
+        if(plugin->rm_ == nullptr)
         {
             return;
         }
@@ -321,15 +321,16 @@ void UmbraPlugin::UpdateWidgetStatus()
             if(entry.controller == nullptr)
             {
                 html += QString("%1<br>&nbsp;&nbsp;Not initialized (busy or no devices connected)")
-                            .arg(QString::fromStdString(entry.transport->GetLocation()));
+                            .arg(QString::fromStdString(entry.transport->GetLocation()).toHtmlEscaped());
                 continue;
             }
 
             exposed++;
 
-            html += QString("%1<br>").arg(QString::fromStdString(entry.controller->name));
+            html += QString("%1<br>")
+                        .arg(QString::fromStdString(entry.controller->name).toHtmlEscaped());
             html += QString("&nbsp;&nbsp;%2<br>")
-                        .arg(QString::fromStdString(entry.controller->location));
+                        .arg(QString::fromStdString(entry.controller->location).toHtmlEscaped());
 
             std::string ports_summary;
 

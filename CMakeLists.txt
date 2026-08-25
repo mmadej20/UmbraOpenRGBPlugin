@@ -41,12 +41,24 @@ if(NOT EXISTS "${OPENRGB_SOURCE_DIR}/RGBController/RGBController.cpp")
 endif()
 
 #-------------------------------------------------------------
-# Qt - OpenRGB 1.0rc3 uses Qt5; Qt6 is supported as well
+# Qt
+#
+# OpenRGB 1.0rc3 ships Qt5 and Qt objects (QWidget/QMenu/plugin
+# metadata) cross the DLL boundary, so the plugin MUST use the
+# same Qt major version as the host application. Qt5 is forced
+# unless you explicitly opt into Qt6 for a host built with Qt6.
 #-------------------------------------------------------------
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+option(UMBRA_PLUGIN_FORCE_QT6 "Link against Qt6 instead of Qt5 (only for OpenRGB hosts built with Qt6)" OFF)
 
-message(STATUS "Using Qt${QT_VERSION_MAJOR}")
+if(UMBRA_PLUGIN_FORCE_QT6)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets)
+    set(UMBRA_QT_MAJOR 6)
+else()
+    find_package(Qt5 REQUIRED COMPONENTS Widgets)
+    set(UMBRA_QT_MAJOR 5)
+endif()
+
+message(STATUS "Using Qt${UMBRA_QT_MAJOR}")
 
 #-------------------------------------------------------------
 # hidapi
@@ -99,6 +111,8 @@ set(UMBRA_PLUGIN_SOURCES
     src/UmbraPlugin.cpp
     src/UmbraWidget.h
     src/UmbraWidget.cpp
+    src/UmbraProtocol.h
+    src/UmbraProtocol.cpp
     src/UmbraController.h
     src/UmbraController.cpp
     src/RGBController_Umbra.h
@@ -119,6 +133,7 @@ add_library(UmbraOpenRGBPlugin SHARED ${UMBRA_PLUGIN_SOURCES})
 target_include_directories(UmbraOpenRGBPlugin PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPENRGB_SOURCE_DIR}"
+    "${OPENRGB_SOURCE_DIR}/RGBController"
     "${OPENRGB_SOURCE_DIR}/i2c_smbus"
 )
 
@@ -127,7 +142,7 @@ target_compile_definitions(UmbraOpenRGBPlugin PRIVATE
 )
 
 target_link_libraries(UmbraOpenRGBPlugin PRIVATE
-    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${UMBRA_QT_MAJOR}::Widgets
     ${HIDAPI_TARGET}
 )
 
@@ -137,11 +152,33 @@ target_link_libraries(UmbraOpenRGBPlugin PRIVATE
 # The plugin exchanges STL objects (std::string/std::vector)
 # with the host across the API boundary. Build it with the
 # SAME toolchain family as your OpenRGB build:
-#   - official Windows releases / MSYS2 builds -> MinGW64 GCC
-#     (do NOT pass -static-libstdc++/-static-libgcc, both
-#     binaries must share libstdc++-6.dll and its heap)
-#   - self-built MSVC OpenRGB                  -> same MSVC toolset
+#   - official Windows releases / MSYS2 MINGW64 -> MinGW GCC
+#   - self-built MSVC OpenRGB                   -> same MSVC toolset
+#
+# On MinGW, libstdc++/libgcc/winpthread are linked statically
+# into the plugin so it never depends on the specific runtime
+# versions shipped next to OpenRGB.exe. This is safe under
+# MinGW: every module allocates through the same shared CRT
+# (msvcrt/ucrtbase), unlike MSVC static CRT private heaps.
 #-------------------------------------------------------------
+if(MINGW)
+    target_link_options(UmbraOpenRGBPlugin PRIVATE
+        -static-libgcc
+        -static-libstdc++
+    )
+    #---------------------------------------------------------
+    # Pull every object from the static winpthreads archive.
+    # References can originate in libstdc++/libgcc archives
+    # processed after ours; whole-archive guarantees their
+    # definitions are already present, so the driver's
+    # trailing dynamic -lwinpthread contributes no import.
+    #---------------------------------------------------------
+    target_link_libraries(UmbraOpenRGBPlugin PRIVATE
+        "-Wl,-Bstatic,--whole-archive"
+        "-lwinpthread"
+        "-Wl,--no-whole-archive,-Bdynamic"
+    )
+endif()
 
 #-------------------------------------------------------------
 # Optional deployment helper:
@@ -155,4 +192,24 @@ if(COPY_PLUGIN_TO)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:UmbraOpenRGBPlugin> "${COPY_PLUGIN_TO}"
         COMMENT "Copying plugin to ${COPY_PLUGIN_TO}")
+endif()
+
+#-------------------------------------------------------------
+# Unit tests for the pure protocol layer (no hardware needed)
+#-------------------------------------------------------------
+option(UMBRA_BUILD_TESTS "Build the UmbraProtocol unit test binary" OFF)
+
+if(UMBRA_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(umbra_protocol_test
+        tests/umbra_protocol_test.cpp
+        src/UmbraProtocol.cpp
+    )
+
+    target_include_directories(umbra_protocol_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+
+    add_test(NAME umbra_protocol COMMAND umbra_protocol_test)
 endif()

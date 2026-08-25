@@ -42,27 +42,39 @@ Sync, etc.
 * OpenRGB **1.0rc3** (Plugin API v4),
 * OpenRGB sources of the **same version** as the binary you build/run
   (the plugin compiles against its headers and links `RGBController.cpp`),
-* Qt5 (Qt6 also works), hidapi (fetched automatically by CMake by default),
-* the same toolchain as OpenRGB: official Windows builds are **MSYS2 MinGW64**
-  — build the plugin with the same compiler (STL objects cross the DLL
-  boundary; do not link libstdc++ statically).
+* Qt5 (the same Qt major version as your OpenRGB build), hidapi (fetched
+  automatically by CMake by default),
+* the same toolchain as OpenRGB: official Windows releases are **MSYS2 MinGW64**
+  — build the plugin with the same compiler family. libstdc++/libgcc/winpthreads
+  are linked statically into the plugin, so it only depends on system DLLs and
+  the Qt5 libraries already shipped next to OpenRGB.exe.
 
 ## Build (MSYS2 MinGW64)
 
 ```bash
 pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake \
-                   mingw-w64-x86_64-qt5-base git
+                   mingw-w64-x86_64-ninja mingw-w64-x86_64-qt5-base git
 
-git clone https://github.com/<you>/UmbraOpenRGBPlugin.git
+git clone https://github.com/mmadej20/UmbraOpenRGBPlugin.git
 cd UmbraOpenRGBPlugin
-cmake -B build -G "MinGW Makefiles" \
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DOPENRGB_SOURCE_DIR=/c/src/OpenRGB \
-      -DCMAKE_BUILD_TYPE=Release
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5   # only needed for CMake >= 4
 cmake --build build -j
 ```
 
 `OPENRGB_SOURCE_DIR` = directory with OpenRGB sources matching your
 OpenRGB.exe version (e.g. tag `release_candidate_1.0rc3.1`).
+
+The pure protocol layer can be unit tested without hardware attached:
+
+```bash
+cmake -B build -DUMBRA_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
+```
+
+The plugin links Qt of the same major version as the host (Qt5 for official
+OpenRGB releases). Use `-DUMBRA_PLUGIN_FORCE_QT6=ON` only for OpenRGB hosts
+that were themselves built against Qt6.
 
 ## Installation
 
@@ -86,10 +98,12 @@ The **UMBRA** tab (Devices) shows detection status and the port layout.
 ## Structure
 
 ```
-src/UmbraController.{h,cpp}      USB HID transport layer (protocol)
+src/UmbraProtocol.{h,cpp}        pure protocol layer (framing/parsing, unit-testable)
+src/UmbraController.{h,cpp}      USB HID transport layer (IO, retries, pacing)
 src/RGBController_Umbra.{h,cpp}  OpenRGB device abstraction (zones/mode)
 src/UmbraPlugin.{h,cpp}          Plugin API v4 entry point (detection, registration)
 src/UmbraWidget.{h,cpp}          Status panel + re-scan
+tests/umbra_protocol_test.cpp    Unit tests for the protocol layer
 docs/UmbraProtocol.md            Protocol notes
 ```
 
