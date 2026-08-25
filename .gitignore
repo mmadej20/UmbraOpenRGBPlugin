@@ -1,0 +1,10 @@
+build/
+build-*/
+out/
+cmake-build-*/
+.vs/
+.vscode/
+.idea/
+*.user
+hidapi-subbuild/
+_deps/
