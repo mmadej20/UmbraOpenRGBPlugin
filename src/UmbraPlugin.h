@@ -56,6 +56,12 @@ private slots:
 
 private:
     /*-----------------------------------------------------*\
+    | How many consecutive enumerations may miss a hub      |
+    | before its entry is dropped (transient-scan guard)    |
+    \*-----------------------------------------------------*/
+    static const unsigned int MISSED_SCANS_BEFORE_DROP = 2;
+
+    /*-----------------------------------------------------*\
     | One hub: HID transport plus (optionally) the          |
     | registered OpenRGB controller exposing it             |
     \*-----------------------------------------------------*/
@@ -63,6 +69,14 @@ private:
     {
         UmbraController*        transport;
         RGBController_Umbra*    controller;     /* null until exposed in OpenRGB */
+
+        /*-----------------------------------------------------*\
+        | Consecutive enumerations that did NOT list this      |
+        | hub's path. A single miss can be transient (device   |
+        | busy re-enumerating during the scan); the entry is   |
+        | only dropped after several misses in a row           |
+        \*-----------------------------------------------------*/
+        unsigned int            missed_scans;
     };
 
     void DetectControllers();

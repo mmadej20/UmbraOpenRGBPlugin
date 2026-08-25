@@ -7,11 +7,14 @@
 # Two independent build options:
 #   UMBRA_BUILD_PLUGIN  (default ON)  the OpenRGB plugin DLL.
 #                                     Requires OPENRGB_SOURCE_DIR, Qt and hidapi.
-#   UMBRA_BUILD_TESTS   (default ON)  pure protocol unit tests.
-#                                     Standalone: no OpenRGB/Qt/hidapi needed.
+#   UMBRA_BUILD_TESTS   (default ON)  unit tests.
+#                                     Protocol tests are standalone
+#                                     (no OpenRGB/Qt/hidapi needed); the
+#                                     QPluginLoader load test additionally
+#                                     requires the plugin build to be on.
 #
 # Protocol tests only:
-#   cmake -B build && cmake --build build && ctest --test-dir build
+#   cmake -B build -DUMBRA_BUILD_PLUGIN=OFF
 #
 # This file is part of the UmbraOpenRGBPlugin project.
 # SPDX-License-Identifier: GPL-2.0-or-later
@@ -19,7 +22,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-project(UmbraOpenRGBPlugin VERSION 1.0.1 LANGUAGES CXX)
+project(UmbraOpenRGBPlugin VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,9 +56,7 @@ endif()
 if(NOT UMBRA_BUILD_PLUGIN)
     message(STATUS "UmbraOpenRGBPlugin: building protocol tests only")
     return()
-endif()
-
-#-------------------------------------------------------------
+endif()#-------------------------------------------------------------
 # OpenRGB source tree
 #
 # The plugin compiles against the headers of the exact OpenRGB
@@ -167,6 +168,15 @@ set(UMBRA_PLUGIN_SOURCES
 
 add_library(UmbraOpenRGBPlugin SHARED ${UMBRA_PLUGIN_SOURCES})
 
+#-------------------------------------------------------------
+# MinGW would prepend "lib" by default; OpenRGB plugins are
+# conventionally named <Name>.dll, so strip the prefix
+#-------------------------------------------------------------
+set_target_properties(UmbraOpenRGBPlugin PROPERTIES
+    PREFIX          ""
+    OUTPUT_NAME     "UmbraOpenRGBPlugin"
+)
+
 target_include_directories(UmbraOpenRGBPlugin PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${OPENRGB_SOURCE_DIR}"
@@ -239,4 +249,39 @@ if(COPY_PLUGIN_TO)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:UmbraOpenRGBPlugin> "${COPY_PLUGIN_TO}"
         COMMENT "Copying plugin to ${COPY_PLUGIN_TO}")
+endif()
+
+#-------------------------------------------------------------
+# QPluginLoader load test - requires the plugin build.
+# Verifies the DLL actually loads through Qt, its metadata
+# is found and the C++/Qt ABI boundary is crossed correctly
+# (critical with statically embedded libstdc++/libgcc/
+# winpthread). Never touches HID hardware.
+#-------------------------------------------------------------
+if(UMBRA_BUILD_TESTS)
+    add_executable(umbra_plugin_load_test
+        tests/plugin_load_test.cpp
+    )
+
+    target_link_libraries(umbra_plugin_load_test PRIVATE
+        Qt${UMBRA_QT_MAJOR}::Core
+        Qt${UMBRA_QT_MAJOR}::Gui
+        Qt${UMBRA_QT_MAJOR}::Widgets
+    )
+
+    target_include_directories(umbra_plugin_load_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${OPENRGB_SOURCE_DIR}"
+        "${OPENRGB_SOURCE_DIR}/i2c_smbus"
+    )
+
+    target_compile_definitions(umbra_plugin_load_test PRIVATE
+        UMBRA_PLUGIN_VERSION_EXPECTED="${UMBRA_PLUGIN_VERSION}"
+    )
+
+    add_dependencies(umbra_plugin_load_test UmbraOpenRGBPlugin)
+
+    add_test(NAME umbra_plugin_load
+             COMMAND umbra_plugin_load_test
+                     $<TARGET_FILE:UmbraOpenRGBPlugin>)
 endif()

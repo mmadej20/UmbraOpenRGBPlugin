@@ -179,33 +179,48 @@ void UmbraPlugin::DetectControllers()
     /*-----------------------------------------------------*\
     | Reaping pass                                          |
     |                                                       |
-    | A controller whose transport lost its HID handle      |
-    | (write failure, unplug) is unregistered and deleted   |
-    | so it can be recreated cleanly. Entries whose device  |
-    | vanished from the bus entirely are released.          |
+    | Two independent death conditions:                     |
+    |                                                       |
+    | 1. The local HID handle broke (write failure, driver  |
+    |    reset). IsConnected() reports false while the      |
+    |    device may still be enumerated - the exposed       |
+    |    controller is dropped so the attach pass below     |
+    |    performs a clean reconnect.                        |
+    |                                                       |
+    | 2. The device disappeared from enumeration. This      |
+    |    catches the unplug-with-static-RGB case where no   |
+    |    further hid_write() ever fails and the stale       |
+    |    handle still looks "connected". To avoid killing   |
+    |    a hub on a single transient enumeration miss, the  |
+    |    entry is only released after several consecutive   |
+    |    misses.                                            |
     \*-----------------------------------------------------*/
     for(auto it = hubs_.begin(); it != hubs_.end(); )
     {
         HubEntry& entry     = *it;
         const bool listed   = path_listed(entry.transport->GetPath());
+        const bool connected= entry.transport->IsConnected();
 
-        if(entry.controller != nullptr && !entry.transport->IsConnected())
+        entry.missed_scans = listed ? 0u : entry.missed_scans + 1u;
+
+        /* Case 1: broken handle */
+        if(entry.controller != nullptr && !connected)
         {
             rm_->UnregisterRGBController(entry.controller);
             delete entry.controller;
             entry.controller = nullptr;
-
-            if(!listed)
-            {
-                delete entry.transport;
-                it = hubs_.erase(it);
-                continue;
-            }
         }
-        else if(entry.controller == nullptr &&
-                !entry.transport->IsConnected() &&
-                !listed)
+
+        /* Case 2: absent from the bus for good */
+        if(!listed && entry.missed_scans >= MISSED_SCANS_BEFORE_DROP)
         {
+            if(entry.controller != nullptr)
+            {
+                rm_->UnregisterRGBController(entry.controller);
+                delete entry.controller;
+                entry.controller = nullptr;
+            }
+
             delete entry.transport;
             it = hubs_.erase(it);
             continue;
@@ -233,8 +248,9 @@ void UmbraPlugin::DetectControllers()
         if(entry == nullptr)
         {
             HubEntry new_entry;
-            new_entry.transport  = new UmbraController(device_info.path, device_info.serial);
-            new_entry.controller = nullptr;
+            new_entry.transport    = new UmbraController(device_info.path, device_info.serial);
+            new_entry.controller   = nullptr;
+            new_entry.missed_scans = 0;
             hubs_.push_back(new_entry);
             entry = &hubs_.back();
         }

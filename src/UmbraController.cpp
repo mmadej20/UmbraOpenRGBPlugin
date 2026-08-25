@@ -110,16 +110,24 @@ static std::string WideToUtf8(const wchar_t* wide)
 
 /*---------------------------------------------------------*\
 | Process-wide hidapi initialization                        |
+|                                                           |
+| Retryable on purpose: a failed hid_init() must not be     |
+| remembered forever (std::call_once would treat the        |
+| attempt as done regardless of its outcome)                |
 \*---------------------------------------------------------*/
 bool UmbraController::InitHidapi()
 {
-    static std::once_flag init_once;
-    static bool initialized = false;
+    static std::mutex init_mutex;
+    static bool       initialized = false;
 
-    std::call_once(init_once, []()
+    std::lock_guard<std::mutex> lock(init_mutex);
+
+    if(initialized)
     {
-        initialized = (hid_init() == 0);
-    });
+        return true;
+    }
+
+    initialized = (hid_init() == 0);
 
     return initialized;
 }

@@ -70,4 +70,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: UmbraOpenRGBPlugin-windows
-          path: build/libUmbraOpenRGBPlugin.dll
+          path: build/UmbraOpenRGBPlugin.dll
