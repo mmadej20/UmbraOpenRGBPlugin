@@ -411,6 +411,48 @@ static void TestRgbPackets()
     CHECK(!BuildRgbPacket(256, 256, rgb, 60, pkt));         /* count overflow   */
 }
 
+/*---------------------------------------------------------*\
+| Golden captures                                           |
+|                                                           |
+| The synthetic tests above verify parser behaviour against |
+| the format we ASSUME. A golden capture from real hardware |
+| verifies the assumption itself. See GOLDEN_CAPTURES.md    |
+| for how to produce one - the file is picked up            |
+| automatically when present.                               |
+\*---------------------------------------------------------*/
+#if __has_include("golden_topology_response.h")
+#include "golden_topology_response.h"
+
+static void TestGoldenCapture()
+{
+    TopologyRecord ports[NUM_PORTS];
+
+    CHECK(ParseTopology(REAL_TOPOLOGY_RESPONSE,
+                        REAL_TOPOLOGY_RESPONSE_SIZE,
+                        ports));
+
+    if(g_failures == 0)
+    {
+        printf("GOLDEN CAPTURE ACCEPTED - detected layout:");
+
+        unsigned int total = 0;
+
+        for(size_t p = 0; p < NUM_PORTS; p++)
+        {
+            printf(" P%02u:%u", (unsigned)(p + 1), ports[p].led_count);
+            total += ports[p].led_count;
+        }
+
+        printf("  total=%u\n", total);
+    }
+}
+#else
+static void TestGoldenCapture()
+{
+    printf("GOLDEN CAPTURE: not present (see tests/GOLDEN_CAPTURES.md) - skipped\n");
+}
+#endif
+
 int main()
 {
     TestChecksum();
@@ -420,6 +462,7 @@ int main()
     TestParseTopologyRejects();
     TestParseStatus();
     TestRgbPackets();
+    TestGoldenCapture();
 
     if(g_failures == 0)
     {

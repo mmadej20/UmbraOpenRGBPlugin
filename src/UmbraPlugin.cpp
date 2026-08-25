@@ -163,6 +163,57 @@ void UmbraPlugin::DetectControllers()
         return;
     }
 
+    auto path_listed = [&found](const std::string& path)
+    {
+        for(const UmbraController::DeviceInfo& info : found)
+        {
+            if(info.path == path)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    /*-----------------------------------------------------*\
+    | Reaping pass                                          |
+    |                                                       |
+    | A controller whose transport lost its HID handle      |
+    | (write failure, unplug) is unregistered and deleted   |
+    | so it can be recreated cleanly. Entries whose device  |
+    | vanished from the bus entirely are released.          |
+    \*-----------------------------------------------------*/
+    for(auto it = hubs_.begin(); it != hubs_.end(); )
+    {
+        HubEntry& entry     = *it;
+        const bool listed   = path_listed(entry.transport->GetPath());
+
+        if(entry.controller != nullptr && !entry.transport->IsConnected())
+        {
+            rm_->UnregisterRGBController(entry.controller);
+            delete entry.controller;
+            entry.controller = nullptr;
+
+            if(!listed)
+            {
+                delete entry.transport;
+                it = hubs_.erase(it);
+                continue;
+            }
+        }
+        else if(entry.controller == nullptr &&
+                !entry.transport->IsConnected() &&
+                !listed)
+        {
+            delete entry.transport;
+            it = hubs_.erase(it);
+            continue;
+        }
+
+        ++it;
+    }
+
     for(const UmbraController::DeviceInfo& device_info : found)
     {
         /*-------------------------------------------------*\
@@ -194,10 +245,25 @@ void UmbraPlugin::DetectControllers()
         }
 
         /*-------------------------------------------------*\
-        | Bring the transport up: handshake + topology +    |
-        | software control handover                         |
+        | Bring the transport up.                           |
+        |                                                   |
+        | An already-connected transport means an earlier   |
+        | init succeeded but reported zero populated ports; |
+        | re-read the topology instead of skipping forever  |
+        | so devices connected later get picked up.         |
         \*-------------------------------------------------*/
-        if(!entry->transport->IsConnected() && !entry->transport->Initialize())
+        bool ready = false;
+
+        if(entry->transport->IsConnected())
+        {
+            ready = entry->transport->RefreshTopology();
+        }
+        else
+        {
+            ready = entry->transport->Initialize();
+        }
+
+        if(!ready)
         {
             continue;
         }

@@ -74,6 +74,17 @@ public:
     bool IsConnected();
 
     /*-----------------------------------------------------*\
+    | Re-reads the port topology on an already-initialized  |
+    | transport. Used when a hub first came up with zero    |
+    | populated ports and devices were connected later.     |
+    | Frame pacing is recomputed, which matters when the    |
+    | hub goes 0 -> N LEDs (packet count changes).          |
+    | On IO failure the transport is marked disconnected so |
+    | the next attempt performs a full reconnect.           |
+    \*-----------------------------------------------------*/
+    bool RefreshTopology();
+
+    /*-----------------------------------------------------*\
     | Device information                                    |
     \*-----------------------------------------------------*/
     const std::string& GetPath() const      { return path_; }
@@ -127,6 +138,9 @@ private:
     bool QueryTopology();
     bool EnableSoftwareControl();
     void CloseInternal();
+
+    /* Recomputes frame pacing from total_led_count_        */
+    void UpdateFramePacingLocked();
 
     /*-----------------------------------------------------*\
     | Members                                               |

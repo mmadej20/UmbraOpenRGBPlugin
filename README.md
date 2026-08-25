@@ -66,15 +66,29 @@ cmake --build build -j
 `OPENRGB_SOURCE_DIR` = directory with OpenRGB sources matching your
 OpenRGB.exe version (e.g. tag `release_candidate_1.0rc3.1`).
 
-The pure protocol layer can be unit tested without hardware attached:
+The pure protocol layer is unit tested without hardware attached
+(standalone - no OpenRGB sources, Qt or hidapi required):
 
 ```bash
-cmake -B build -DUMBRA_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
+cmake -B build -DUMBRA_BUILD_PLUGIN=OFF
+cmake --build build && ctest --test-dir build
 ```
 
-The plugin links Qt of the same major version as the host (Qt5 for official
-OpenRGB releases). Use `-DUMBRA_PLUGIN_FORCE_QT6=ON` only for OpenRGB hosts
-that were themselves built against Qt6.
+If you own the hub, please add a golden capture from real hardware -
+see `tests/GOLDEN_CAPTURES.md`. That is the only way to verify the parser
+against actual device bytes rather than our assumptions.
+
+Qt major version must match the host application: official OpenRGB releases
+use Qt5. Use `-DUMBRA_PLUGIN_FORCE_QT6=ON` only for OpenRGB hosts that were
+themselves built against Qt6.
+
+Runtime DLLs: official Windows OpenRGB packages ship **no** MinGW runtime
+(`libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll`) next to
+OpenRGB.exe - the host links them statically, and so does this plugin.
+Only system DLLs and the Qt libraries already present in the host folder
+are needed at load time. If you build your own OpenRGB with dynamic
+runtimes, remove the `-static-lib*` flags in CMakeLists.txt so both modules
+share one libstdc++.
 
 ## Installation
 
@@ -91,9 +105,10 @@ The **UMBRA** tab (Devices) shows detection status and the port layout.
 | Problem | Solution |
 |---|---|
 | Device does not appear | Close the official AsiaHorse software (tray too) and press *Re-scan devices*. The plugin also retries after every OpenRGB detection run |
-| Ports report 0 LEDs | Topology is read once during initialization. Connect devices and re-scan; if still 0 — run the official software once (LED auto-detection) or send command `07` with a diagnostic tool |
+| Ports report 0 LEDs | Topology is re-read on every detection run. Connect devices and press *Re-scan devices*; if still 0 — run the official software once (LED auto-detection) or send command `07` with a diagnostic tool |
 | Colors "jump" between ports | Do not mix this plugin with SignalRGB/official software — only one host can hold the HID endpoint open |
-| Plugin does not load | Check that your OpenRGB has API v4 (OpenRGB 1.0.x) and that the DLL was built with the same toolchain as OpenRGB |
+| Hub detected but initialization fails | First suspect: response format differs from our assumptions (frame length / checksum). Capture a real response with USBPcap and add it as a golden test — see `tests/GOLDEN_CAPTURES.md` |
+| Plugin does not load | Check that your OpenRGB has API v4 (OpenRGB 1.0.x) and that the DLL was built with the same toolchain family as OpenRGB |
 
 ## Structure
 

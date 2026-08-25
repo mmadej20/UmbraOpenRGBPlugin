@@ -4,13 +4,22 @@
 # Builds UmbraOpenRGBPlugin - an OpenRGB Plugin API v4
 # plugin adding support for the AsiaHorse UMBRA ARGB Hub
 #
+# Two independent build options:
+#   UMBRA_BUILD_PLUGIN  (default ON)  the OpenRGB plugin DLL.
+#                                     Requires OPENRGB_SOURCE_DIR, Qt and hidapi.
+#   UMBRA_BUILD_TESTS   (default ON)  pure protocol unit tests.
+#                                     Standalone: no OpenRGB/Qt/hidapi needed.
+#
+# Protocol tests only:
+#   cmake -B build && cmake --build build && ctest --test-dir build
+#
 # This file is part of the UmbraOpenRGBPlugin project.
 # SPDX-License-Identifier: GPL-2.0-or-later
 #-------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.16)
 
-project(UmbraOpenRGBPlugin VERSION 1.0.0 LANGUAGES CXX)
+project(UmbraOpenRGBPlugin VERSION 1.0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +27,33 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_AUTOMOC ON)
 
 set(UMBRA_PLUGIN_VERSION ${PROJECT_VERSION})
+
+option(UMBRA_BUILD_PLUGIN "Build the OpenRGB plugin"          ON)
+option(UMBRA_BUILD_TESTS  "Build the UmbraProtocol unit tests" ON)
+
+#-------------------------------------------------------------
+# Unit tests for the pure protocol layer.
+# No hardware, no Qt, no hidapi, no OpenRGB required.
+#-------------------------------------------------------------
+if(UMBRA_BUILD_TESTS)
+    enable_testing()
+
+    add_executable(umbra_protocol_test
+        tests/umbra_protocol_test.cpp
+        src/UmbraProtocol.cpp
+    )
+
+    target_include_directories(umbra_protocol_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    )
+
+    add_test(NAME umbra_protocol COMMAND umbra_protocol_test)
+endif()
+
+if(NOT UMBRA_BUILD_PLUGIN)
+    message(STATUS "UmbraOpenRGBPlugin: building protocol tests only")
+    return()
+endif()
 
 #-------------------------------------------------------------
 # OpenRGB source tree
@@ -37,7 +73,8 @@ if(NOT EXISTS "${OPENRGB_SOURCE_DIR}/RGBController/RGBController.cpp")
     message(FATAL_ERROR
         "OPENRGB_SOURCE_DIR is not set or does not point to an OpenRGB source tree.\n"
         "Set it to a checkout of the same OpenRGB version you are building/running,\n"
-        "e.g.:  cmake -DOPENRGB_SOURCE_DIR=/path/to/OpenRGB ..")
+        "e.g.:  cmake -DOPENRGB_SOURCE_DIR=/path/to/OpenRGB ..\n"
+        "(or configure with -DUMBRA_BUILD_PLUGIN=OFF to build only the protocol tests)")
 endif()
 
 #-------------------------------------------------------------
@@ -149,17 +186,27 @@ target_link_libraries(UmbraOpenRGBPlugin PRIVATE
 #-------------------------------------------------------------
 # Toolchain notes
 #
-# The plugin exchanges STL objects (std::string/std::vector)
-# with the host across the API boundary. Build it with the
-# SAME toolchain family as your OpenRGB build:
-#   - official Windows releases / MSYS2 MINGW64 -> MinGW GCC
-#   - self-built MSVC OpenRGB                   -> same MSVC toolset
+# STL objects (std::string/std::vector) cross the plugin API
+# boundary in both directions, which makes it a C++ ABI
+# boundary. Build the plugin with the SAME toolchain that was
+# used for your OpenRGB binary:
 #
-# On MinGW, libstdc++/libgcc/winpthread are linked statically
-# into the plugin so it never depends on the specific runtime
-# versions shipped next to OpenRGB.exe. This is safe under
-# MinGW: every module allocates through the same shared CRT
-# (msvcrt/ucrtbase), unlike MSVC static CRT private heaps.
+#   Official Windows releases (MSYS2 MinGW64 GCC):
+#     Those packages ship NO libstdc++-6.dll/libgcc_s/libwinpthread
+#     next to OpenRGB.exe - the host itself links them statically.
+#     This build mirrors that exactly: libstdc++, libgcc and
+#     winpthread are statically linked into the plugin as well,
+#     so the only runtime dependencies are system DLLs and the
+#     Qt libraries already present in the host folder.
+#     Cross-module new/delete still routes through the shared
+#     CRT allocator (msvcrt/ucrtbase), so by-value std::string
+#     handover stays safe even with two embedded libstdc++
+#     copies in one process.
+#
+#   Self-built OpenRGB:
+#     Use the exact compiler/CRT combination of that build.
+#     If it links dynamic runtimes, remove the -static flags
+#     below so both modules share one libstdc++ instance.
 #-------------------------------------------------------------
 if(MINGW)
     target_link_options(UmbraOpenRGBPlugin PRIVATE
@@ -192,24 +239,4 @@ if(COPY_PLUGIN_TO)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:UmbraOpenRGBPlugin> "${COPY_PLUGIN_TO}"
         COMMENT "Copying plugin to ${COPY_PLUGIN_TO}")
-endif()
-
-#-------------------------------------------------------------
-# Unit tests for the pure protocol layer (no hardware needed)
-#-------------------------------------------------------------
-option(UMBRA_BUILD_TESTS "Build the UmbraProtocol unit test binary" OFF)
-
-if(UMBRA_BUILD_TESTS)
-    enable_testing()
-
-    add_executable(umbra_protocol_test
-        tests/umbra_protocol_test.cpp
-        src/UmbraProtocol.cpp
-    )
-
-    target_include_directories(umbra_protocol_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    )
-
-    add_test(NAME umbra_protocol COMMAND umbra_protocol_test)
 endif()

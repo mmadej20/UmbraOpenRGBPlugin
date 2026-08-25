@@ -77,24 +77,32 @@ static std::string WideToUtf8(const wchar_t* wide)
 
     for(const wchar_t* p = wide; *p != 0; p++)
     {
-        unsigned int cp = (unsigned int)*p & 0xFFFFu;
-
         /*-------------------------------------------------*\
-        | Decode UTF-16 surrogate pairs when wchar_t is     |
-        | 16-bit (Windows)                                  |
+        | On Windows wchar_t is 16-bit UTF-16 and surrogate |
+        | pairs must be decoded. On Linux/macOS wchar_t is  |
+        | 32-bit and already holds the full codepoint       |
         \*-------------------------------------------------*/
-        if(cp >= 0xD800 && cp <= 0xDBFF && p[1] != 0)
+        if constexpr(sizeof(wchar_t) == 2)
         {
-            unsigned int low = (unsigned int)p[1] & 0xFFFFu;
+            unsigned int cp = (unsigned int)*p & 0xFFFFu;
 
-            if(low >= 0xDC00 && low <= 0xDFFF)
+            if(cp >= 0xD800 && cp <= 0xDBFF && p[1] != 0)
             {
-                cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
-                p++;
-            }
-        }
+                unsigned int low = (unsigned int)p[1] & 0xFFFFu;
 
-        AppendUtf8(out, cp);
+                if(low >= 0xDC00 && low <= 0xDFFF)
+                {
+                    cp = 0x10000u + ((cp - 0xD800u) << 10) + (low - 0xDC00u);
+                    p++;
+                }
+            }
+
+            AppendUtf8(out, cp);
+        }
+        else
+        {
+            AppendUtf8(out, (unsigned int)*p);
+        }
     }
 
     return out;
@@ -289,6 +297,19 @@ bool UmbraController::Initialize()
     | Frame pacing interval: each frame needs one write     |
     | per packet; stay below TARGET_WRITES_PER_SEC total    |
     \*-----------------------------------------------------*/
+    UpdateFramePacingLocked();
+
+    frame_paced_        = false;
+    initialized_        = true;
+
+    return true;
+}
+
+void UmbraController::UpdateFramePacingLocked()
+{
+    /*-----------------------------------------------------*\
+    | mutex_ (io_mutex_) must be held by the caller         |
+    \*-----------------------------------------------------*/
     unsigned int packets = (total_led_count_ > 0)
                          ? ((total_led_count_ +
                              (unsigned int)UmbraProtocol::LEDS_PER_PACKET - 1u) /
@@ -298,9 +319,33 @@ bool UmbraController::Initialize()
     frame_interval_ms_ = (packets > 0)
                        ? (double)((packets * 1000u + TARGET_WRITES_PER_SEC - 1u) / TARGET_WRITES_PER_SEC)
                        : 0.0;
+}
 
-    frame_paced_        = false;
-    initialized_        = true;
+bool UmbraController::RefreshTopology()
+{
+    std::lock_guard<std::mutex> guard(io_mutex_);
+
+    if(dev_ == nullptr || !initialized_)
+    {
+        return false;
+    }
+
+    if(!QueryTopology())
+    {
+        /*-----------------------------------------------------*\
+        | IO failure means the device is gone or wedged - mark  |
+        | the transport broken so the next attempt performs a   |
+        | full reconnect instead of talking into a dead handle  |
+        \*-----------------------------------------------------*/
+        CloseInternal();
+        return false;
+    }
+
+    /*-----------------------------------------------------*\
+    | Pacing depends on packet count and must be recomputed |
+    | when the topology changes (e.g. 0 -> 100 LEDs)        |
+    \*-----------------------------------------------------*/
+    UpdateFramePacingLocked();
 
     return true;
 }
@@ -603,6 +648,13 @@ bool UmbraController::SendFrame(const unsigned char* rgb, unsigned int led_count
 
         if(!WritePayload(packet, sizeof(packet)))
         {
+            /*-------------------------------------------------*\
+            | A failed write means the handle is no longer      |
+            | usable (unplug/replug, driver reset). Mark the    |
+            | transport broken so IsConnected() reports reality |
+            | and detection can perform a full reconnect.       |
+            \*-------------------------------------------------*/
+            CloseInternal();
             return false;
         }
     }
